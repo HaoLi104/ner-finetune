@@ -1,8 +1,8 @@
 {
-  "train_path": "data/huizhenbingli1119.json",
-  "dev_path":   "data/menzhenbingli1119.json",
+  "train_path": "/data/ocean/FT_workspace/ner-finetune/data/huizhenbingli1119.json",
+  "dev_path":   "/data/ocean/FT_workspace/ner-finetune/data/menzhenbingli1119.json",
   "test_path":  null,
-  "pretrained_model_path": "/data/ocean/bpe_workspace/output_medical_bert_v2_8gpu/final_model",  // 远端路径，后面在服务器改
+  "pretrained_model_path": "/data/ocean/bpe_workspace/output_medical_bert_v2_8gpu/final_model",
   "tokenizer_path":        "/data/ocean/bpe_workspace/output_medical_bert_v2_8gpu/final_model",
   "max_seq_length": 512,
   "per_device_train_batch_size": 16,
@@ -11,6 +11,6 @@
   "num_train_epochs": 5,
   "learning_rate": 3e-5,
   "warmup_ratio": 0.1,
-  "output_dir": "/data/ocean/BERT/kv_ner_output",
+  "output_dir": "/data/ocean/FT_workspace/ner-finetune/kv_ner_output",
   "fp16": true
 }
