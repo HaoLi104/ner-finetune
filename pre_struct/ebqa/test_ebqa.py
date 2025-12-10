@@ -1,0 +1,712 @@
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+
+import os
+import sys
+import json
+import tempfile
+import logging
+import re
+from dataclasses import dataclass
+from typing import Dict, Any, List, Tuple, Optional
+
+import torch
+
+# 泛化的"下一个字段标题"识别：换行、或明确的字段标题模式
+# 优化：提高空格阈值，避免过度截断
+GENERIC_NEXT_FIELD = re.compile(
+    r"[\n\r]{2,}|"  # 双换行（段落边界）
+    r"(?:(?<!\S)[\u4e00-\u9fff]{2,6}\s*[：:]\s*)"  # 2-6个汉字+冒号（更严格）
+)
+
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _THIS_DIR not in sys.path:
+    sys.path.append(_THIS_DIR)
+
+from da_core.dataset import EnhancedQADataset, QACollator
+from model_ebqa import EBQAModel
+
+
+def _dedup_repeat_short(s: str) -> str:
+    """合并2–6字的重复片段（中间可有1个空格），如"李杜娟 李杜娟" -> "李杜娟" """
+    return re.sub(r'([\u4e00-\u9fffA-Za-z0-9]{2,6})\s+\1', r'\1', s).strip()
+
+
+def _final_type_trim(key: str, text: str) -> str:
+    """按字段类型进行终裁剪，去除冗余后缀"""
+    s = text.strip()
+    if not s:
+        return s
+    
+    # 对于短文本字段（<=10个字），尝试截取到第一个空格或句读符号
+    if len(s) <= 20:
+        # 如果有多个空格分隔的部分，取第一部分
+        parts = s.split()
+        if len(parts) > 1:
+            # 对于2-6字的中文片段，可能是人名
+            first_part = parts[0]
+            if re.match(r'^[\u4e00-\u9fff·]{2,6}$', first_part):
+                return first_part
+    
+    return s
+
+
+def load_field_keywords(keys_path: str) -> Dict[str, List[str]]:
+    """加载字段关键词和别名"""
+    with open(keys_path, 'r', encoding='utf-8') as f:
+        keys_data = json.load(f)
+    
+    field_keywords = {}
+    for report_type, fields in keys_data.items():
+        if isinstance(fields, dict):
+            for field_name, field_info in fields.items():
+                if isinstance(field_info, dict):
+                    keywords = [field_name]  # 主关键词
+                    if "别名" in field_info and field_info["别名"]:
+                        keywords.extend(field_info["别名"])  # 添加别名
+                    field_keywords[field_name] = keywords
+    
+    return field_keywords
+
+
+def truncate_by_keyword_boundary(text: str, current_field: str, field_keywords: Dict[str, List[str]], 
+                                original_text: str, start_pos: int) -> Tuple[str, Optional[str]]:
+    """基于关键词边界截断文本，返回(截断文本, 剩余文本)"""
+    if not text or start_pos < 0:
+        return text, None
+    
+    # 获取当前字段在原文中的绝对位置
+    abs_start = start_pos
+    abs_end = abs_start + len(text)
+    
+    # 在预测文本后面查找其他字段的关键词
+    search_text = original_text[abs_start:]
+    
+    # 收集所有其他字段的关键词
+    other_keywords = []
+    for field, keywords in field_keywords.items():
+        if field != current_field:
+            other_keywords.extend(keywords)
+    
+    # 查找最近的其他字段关键词位置
+    min_boundary_pos = len(search_text)  # 默认不截断
+    found_keyword = None
+    
+    for keyword in other_keywords:
+        # 构建匹配模式：宽松的空白+中英冒号+空白，更稳健地识别边界
+        patterns = [
+            rf"{re.escape(keyword)}\s*[：:]\s*",  # 关键词+可选空白+中英冒号+可选空白
+            rf"\n{re.escape(keyword)}"           # 换行+关键词兜底
+        ]
+        
+        for pattern in patterns:
+            matches = list(re.finditer(pattern, search_text, re.IGNORECASE))
+            for match in matches:
+                start_in_search = match.start()
+                
+                # 对于紧密连接的字段格式，放宽边界检测条件
+                is_valid_boundary = True
+                if start_in_search > 0:
+                    prev_char = search_text[start_in_search - 1]
+                    # 只有当前面是句子内部的标点或连接词时才跳过
+                    # 允许中文字符、数字后直接跟字段名（如：唐字休性别、73岁科室）
+                    if prev_char in ['，', '。', '、', '的', '和', '与', '及']:
+                        is_valid_boundary = False
+                
+                # 这是一个有效的边界
+                if is_valid_boundary and start_in_search < min_boundary_pos:
+                    min_boundary_pos = start_in_search
+                    found_keyword = keyword
+    
+    # 泛化"下一个字段标题"探测（换行或"xxxx："）
+    m2 = GENERIC_NEXT_FIELD.search(search_text)
+    if m2 and m2.start() < min_boundary_pos:
+        min_boundary_pos = m2.start()
+        found_keyword = "GENERIC_FIELD"
+    
+    # 若仍未命中：只对极短字段（<=10字）做兜底截断
+    # 优化：提高阈值，避免长字段被误截断
+    if min_boundary_pos == len(search_text):
+        if len(text) <= 6:  # 极短字段（如姓名3字、性别1字），在空格或标点截断
+            m3 = re.search(r"[\s，。,；;、:]", search_text)
+            if m3:
+                min_boundary_pos = m3.start()
+                found_keyword = "PUNCT"
+        elif len(text) <= 10:  # 短字段（如病理号），只在明显的句读符号截断
+            m3 = re.search(r"[。；;]", search_text)
+            if m3:
+                min_boundary_pos = m3.start()
+                found_keyword = "PUNCT"
+        # 对于>10字的字段，不做兜底截断，保留完整内容
+    
+    # 截断文本
+    if min_boundary_pos < len(search_text):
+        truncated_text = search_text[:min_boundary_pos].strip()
+        remaining_text = search_text[min_boundary_pos:].strip()
+        print(f"[BOUNDARY] {current_field} 在关键词 '{found_keyword}' 处截断，原长度: {len(text)}, 截断后: {len(truncated_text)}, 剩余: {len(remaining_text)}")
+        return truncated_text, remaining_text
+    
+    return text, None
+
+
+try:
+    from config_io import (
+        load_config as load_ebqa_cfg,
+        resolve_model_dir,
+        resolve_tokenizer_name,
+        resolve_report_struct_path,
+        lengths_from,
+        chunk_mode_from,
+        predict_block,
+    )
+except Exception:
+    from config_io import (
+        load_config as load_ebqa_cfg,
+        resolve_model_dir,
+        resolve_tokenizer_name,
+        resolve_report_struct_path,
+        lengths_from,
+        chunk_mode_from,
+        predict_block,
+    )
+
+
+@dataclass
+class PredictConfig:
+    # 资源（从配置读取）
+    report_struct_path: str = ""
+    tokenizer_name: str = ""  # 必须由配置提供
+    model_dir: str = ""  # 训练产物目录（如 runs/ebqa_v3/best）
+
+    # 与训练一致的超参
+    max_seq_len: int = 0
+    max_tokens_ctx: int = 0
+    max_answer_len: int = 1000  # 大值，由动态机制控制
+    batch_size: int = 0
+    use_question_templates: bool = True
+    chunk_mode: str = ""
+
+    # no-answer 策略
+    enable_no_answer: bool = True
+    null_threshold: float = 0.0
+    null_agg: str = "mean"  # 或 "max"
+
+    # 是否只使用“该标题”的键
+    only_title_keys: bool = True
+
+
+def _get_logger():
+    lg = logging.getLogger("ebqa_infer")
+    if not lg.handlers:
+        h = logging.StreamHandler()
+        h.setFormatter(
+            logging.Formatter("[%(asctime)s] %(levelname)s - %(message)s", "%H:%M:%S")
+        )
+        lg.addHandler(h)
+        lg.setLevel(logging.INFO)
+    return lg
+
+
+"""推理与结构映射辅助。"""
+
+
+def _load_json(path: str) -> Dict[str, Any]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _dedup_keep_order(items: List[str]) -> List[str]:
+    seen, out = set(), []
+    for x in items:
+        if x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+
+def _make_struct_override(
+    report_title: str, cfg: PredictConfig
+) -> Tuple[str, List[str]]:
+    """生成仅包含当前标题键的临时结构映射文件。"""
+    struct_raw = _load_json(cfg.report_struct_path) or {}
+    title_keys = list(struct_raw.get(report_title, []) or [])
+    title_keys = _dedup_keep_order([k for k in title_keys if str(k).strip()])
+    data = {report_title: title_keys}
+    f = tempfile.NamedTemporaryFile(
+        delete=False, suffix=".json", mode="w", encoding="utf-8"
+    )
+    json.dump(data, f, ensure_ascii=False)
+    f.close()
+    return f.name, title_keys
+
+
+"""模型/数据集构建与推理。"""
+
+
+
+
+# ==================== 智能模型缓存机制 ====================
+# 添加日期：2025-10-30
+# 功能：自动过期清理 + 健康检查
+import time
+import threading
+from dataclasses import dataclass
+from typing import Optional, Tuple
+
+
+@dataclass
+class ModelCacheEntry:
+    """模型缓存条目"""
+    model: Any
+    collate: Any
+    device: Any
+    last_access_time: float
+    cache_key: Tuple
+
+
+# 全局缓存
+_EBQA_MODEL_CACHE = {}
+_cache_lock = threading.Lock()
+
+# 配置（可通过环境变量调整）
+CACHE_TTL_SECONDS = int(os.environ.get("EBQA_MODEL_CACHE_TTL", "1800"))  # 默认30分钟
+AUTO_CLEANUP_INTERVAL = int(os.environ.get("EBQA_CACHE_CLEANUP_INTERVAL", "300"))  # 5分钟检查一次
+
+
+def _check_model_health(entry: ModelCacheEntry) -> bool:
+    """检查模型是否健康（是否还在内存/GPU中）"""
+    try:
+        # 检查模型是否还在设备上
+        if hasattr(entry.model, 'model'):
+            device = next(entry.model.model.parameters()).device
+            return device == entry.device
+        return True
+    except Exception as e:
+        logger = _get_logger()
+        logger.warning(f"[ModelCache] 健康检查失败: {e}")
+        return False
+
+
+def _cleanup_expired_cache():
+    """清理过期的缓存"""
+    with _cache_lock:
+        now = time.time()
+        expired_keys = []
+        
+        for key, entry in _EBQA_MODEL_CACHE.items():
+            # 检查是否过期
+            if now - entry.last_access_time > CACHE_TTL_SECONDS:
+                expired_keys.append(key)
+            # 检查健康状态
+            elif not _check_model_health(entry):
+                expired_keys.append(key)
+        
+        if expired_keys:
+            logger = _get_logger()
+            for key in expired_keys:
+                logger.info(f"[ModelCache] 清理过期/无效缓存: {key[:2]}...")
+                entry = _EBQA_MODEL_CACHE[key]
+                
+                # 1. 先将模型移到 CPU（释放 GPU 显存）
+                try:
+                    if hasattr(entry.model, 'model') and hasattr(entry.model.model, 'cpu'):
+                        entry.model.model.cpu()
+                        logger.info(f"[ModelCache] 模型已移至 CPU，释放 GPU 显存")
+                except Exception as e:
+                    logger.debug(f"[ModelCache] 模型移至 CPU 失败: {e}")
+                
+                # 2. 删除缓存引用
+                del _EBQA_MODEL_CACHE[key]
+            
+            # 3. 强制垃圾回收
+            import gc
+            gc.collect()
+            
+            # 4. 清理 PyTorch 的 GPU 缓存（只清理未使用的部分）
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    logger.info(f"[ModelCache] GPU 缓存已清理")
+            except Exception:
+                pass
+            
+            logger.info(f"[ModelCache] 已清理 {len(expired_keys)} 个缓存条目")
+
+
+# 后台清理线程
+_cleanup_thread = None
+_cleanup_running = False
+
+
+def _start_auto_cleanup():
+    """启动自动清理线程"""
+    global _cleanup_thread, _cleanup_running
+    
+    if _cleanup_thread is not None and _cleanup_thread.is_alive():
+        return
+    
+    def cleanup_worker():
+        logger = _get_logger()
+        logger.info(f"[ModelCache] 启动自动清理线程（TTL={CACHE_TTL_SECONDS}秒，检查间隔={AUTO_CLEANUP_INTERVAL}秒）")
+        
+        while _cleanup_running:
+            time.sleep(AUTO_CLEANUP_INTERVAL)
+            _cleanup_expired_cache()
+    
+    _cleanup_running = True
+    _cleanup_thread = threading.Thread(target=cleanup_worker, daemon=True)
+    _cleanup_thread.start()
+
+
+def _get_smart_cached_model(cfg: PredictConfig):
+    """获取缓存的模型（智能版本，带过期和健康检查）
+    
+    Args:
+        cfg: 预测配置
+        
+    Returns:
+        (model, collate, device): 缓存的模型、collator 和设备
+    """
+    cache_key = (
+        cfg.model_dir,
+        cfg.tokenizer_name,
+        cfg.batch_size,
+        cfg.max_seq_len,
+    )
+    
+    logger = _get_logger()
+    
+    with _cache_lock:
+        # 检查缓存是否存在且有效
+        if cache_key in _EBQA_MODEL_CACHE:
+            entry = _EBQA_MODEL_CACHE[cache_key]
+            
+            # 健康检查
+            if _check_model_health(entry):
+                # 更新访问时间
+                entry.last_access_time = time.time()
+                logger.info(f"[ModelCache] ✅ 使用缓存模型（上次访问：{int(time.time() - entry.last_access_time)}秒前）")
+                return entry.model, entry.collate, entry.device
+            else:
+                # 健康检查失败，删除缓存
+                logger.warning(f"[ModelCache] ⚠️ 缓存模型无效，重新加载")
+                del _EBQA_MODEL_CACHE[cache_key]
+        
+        # 缓存不存在或无效，重新加载
+        logger.info(f"[ModelCache] 首次加载模型: {cfg.model_dir}")
+        model, collate, device = load_ebqa(cfg)
+        
+        # 创建缓存条目
+        entry = ModelCacheEntry(
+            model=model,
+            collate=collate,
+            device=device,
+            last_access_time=time.time(),
+            cache_key=cache_key
+        )
+        
+        _EBQA_MODEL_CACHE[cache_key] = entry
+        logger.info(f"[ModelCache] 模型已缓存（TTL={CACHE_TTL_SECONDS}秒）")
+        
+        # 确保清理线程运行
+        _start_auto_cleanup()
+        
+        return model, collate, device
+
+
+def clear_ebqa_model_cache():
+    """手动清理所有模型缓存"""
+    global _cleanup_running
+    
+    with _cache_lock:
+        logger = _get_logger()
+        count = len(_EBQA_MODEL_CACHE)
+        
+        if count > 0:
+            logger.info(f"[ModelCache] 手动清理 {count} 个缓存模型")
+            
+            # 1. 先将所有模型移到 CPU
+            for key, entry in _EBQA_MODEL_CACHE.items():
+                try:
+                    if hasattr(entry.model, 'model') and hasattr(entry.model.model, 'cpu'):
+                        entry.model.model.cpu()
+                except Exception:
+                    pass
+            
+            # 2. 清除缓存字典
+            _EBQA_MODEL_CACHE.clear()
+            
+            # 3. 强制垃圾回收
+            import gc
+            gc.collect()
+            
+            # 4. 清理 GPU 缓存
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    logger.info("[ModelCache] GPU 缓存已清理")
+            except Exception as e:
+                logger.warning(f"[ModelCache] GPU 缓存清理失败: {e}")
+        
+        # 停止清理线程
+        _cleanup_running = False
+
+
+def get_cache_info():
+    """获取缓存信息"""
+    with _cache_lock:
+        now = time.time()
+        cache_details = []
+        
+        for key, entry in _EBQA_MODEL_CACHE.items():
+            idle_time = int(now - entry.last_access_time)
+            ttl_remaining = max(0, CACHE_TTL_SECONDS - idle_time)
+            cache_details.append({
+                "key": str(key[:2]),
+                "idle_seconds": idle_time,
+                "ttl_remaining": ttl_remaining,
+                "healthy": _check_model_health(entry)
+            })
+        
+        return {
+            "cached_models": len(_EBQA_MODEL_CACHE),
+            "ttl_seconds": CACHE_TTL_SECONDS,
+            "auto_cleanup_running": _cleanup_running,
+            "details": cache_details
+        }
+
+
+def load_ebqa(cfg: PredictConfig):
+    logger = _get_logger()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    logger.info(f"Device: {device}")
+
+    if not cfg.model_dir:
+        raise RuntimeError("model_dir must be provided by EBQA config")
+    if not cfg.tokenizer_name:
+        raise RuntimeError("tokenizer_name must be provided by EBQA config")
+
+    model = EBQAModel(
+        model_name_or_path=cfg.model_dir,
+        tokenizer_name_or_path=cfg.tokenizer_name,
+        per_device_eval_batch_size=cfg.batch_size,
+        fp16=(device == "cuda"),
+        max_answer_len=cfg.max_answer_len,
+        save_strategy="no",
+    )
+
+    pad_id = getattr(getattr(model, "tokenizer", None), "pad_token_id", 0) or 0
+    collate = QACollator(
+        pad_id=pad_id,
+        pad_token_type_id=0,
+        pad_attention_mask=0,
+        keep_debug_fields=True,  # 让 predict 能回填字符级文本
+    )
+    return model, collate, device
+
+
+def _build_single_ds(
+    cfg: PredictConfig,
+    report_title: str,
+    report_text: str,
+    struct_override_path: Optional[str],
+) -> EnhancedQADataset:
+    """
+    单条报告构造：与训练一致（问题模板/切块/offset/seq_ids）
+    """
+    with tempfile.NamedTemporaryFile(
+        delete=False, suffix=".json", mode="w", encoding="utf-8"
+    ) as tmpf:
+        json.dump(
+            [{"report_title": report_title, "report": report_text}],
+            tmpf,
+            ensure_ascii=False,
+        )
+        tmp_path = tmpf.name
+
+    if not cfg.tokenizer_name:
+        raise RuntimeError("tokenizer_name must be provided by EBQA config")
+
+    ds = EnhancedQADataset(
+        data_path=tmp_path,
+        report_struct_path=(struct_override_path or cfg.report_struct_path),
+        tokenizer_name=cfg.tokenizer_name,
+        max_seq_len=cfg.max_seq_len,
+        max_tokens_ctx=cfg.max_tokens_ctx,
+        max_answer_len=cfg.max_answer_len,
+        use_question_templates=cfg.use_question_templates,
+        keep_debug_fields=True,  # 便于回填文本
+        chunk_mode=cfg.chunk_mode,  # 跟训练一致
+        only_title_keys=True,  # 推理阶段只按"本标题键"发问
+        inference_mode=True,  # 推理模式：让模型自主预测
+        dynamic_answer_length=True,  # 启用动态答案长度
+        autobuild=True,
+        show_progress=False,
+    )
+
+    try:
+        os.unlink(tmp_path)
+    except Exception:
+        pass
+    return ds
+
+
+# =========================
+# 预测（不做规则清洗/兜底）
+# =========================
+def predict_one_base(
+    cfg: PredictConfig,
+    model: EBQAModel,
+    collate: QACollator,
+    report_title: str,
+    report_text: str,
+) -> Dict[str, Dict[str, Any]]:
+    lg = _get_logger()
+
+    # 加载字段关键词用于边界截断
+    # 仅取该标题的键
+    struct_path, used_keys = _make_struct_override(report_title, cfg)
+    
+    # 加载全量关键词，然后过滤到当前标题使用的键（避免误截断）
+    field_keywords_all = load_field_keywords(cfg.report_struct_path)
+    field_keywords = {k: field_keywords_all.get(k, [k]) for k in used_keys}
+    used_keys = _dedup_keep_order(used_keys)
+    lg.info(f"[infer] title='{report_title}', keys={len(used_keys)} -> {used_keys}")
+
+    ds = _build_single_ds(cfg, report_title, report_text, struct_path)
+    try:
+        os.unlink(struct_path)
+    except Exception:
+        pass
+
+    # 保留全文，必要时用位置信息回填
+    full = ds.records[0].get("report", "") if getattr(ds, "records", None) else ""
+    if not full and getattr(ds, "records", None):
+        full = EnhancedQADataset._get_report_text(ds.records[0])
+
+    # 直接调用模型的 predict（使用动态长度 cap，不依赖边界）
+    raw = model.predict(
+        dataset=ds,
+        data_collator=collate,
+        batch_size=cfg.batch_size,
+        enable_no_answer=cfg.enable_no_answer,
+        null_threshold=cfg.null_threshold,
+        null_agg=str(cfg.null_agg or "mean"),
+        debug_print=True,
+    )
+
+    # 按键聚合；必要时用位置信息剪切文本
+    out: Dict[str, Dict[str, Any]] = {}
+    for it in raw:
+        k = str(it.get("question_key") or "")
+        if k not in used_keys:
+            continue
+        s = int(it.get("start_char", -1))
+        e = int(it.get("end_char", -1))
+        t = str(it.get("text", "") or "")
+        if (not t) and s >= 0 and e > s and full:
+            try:
+                t = full[s:e]
+            except Exception:
+                t = ""
+        
+        # ===== 最优后处理配置 =====
+        # 保留有效的后处理，禁用有害的
+        
+        # 1. 去重：修复重复片段（如"李杜娟 李杜娟" -> "李杜娟"）
+        # if t:
+        #     t = _dedup_repeat_short(t)
+        #     if s >= 0:
+        #         e = s + len(t)
+        
+        # 2. 尾部标点修复：自动添加模型漏掉的尾部标点
+        # if t and e >= 0 and e < len(full):
+        #     next_char = full[e] if e < len(full) else ''
+        #     # 常见的尾部标点：句号、右括号、顿号等
+        #     if next_char in '。）】、' and not t.endswith(next_char):
+        #         t += next_char
+        #         e += 1
+        
+        # 3. 边界截断：禁用（经验证导致损失）
+        # 4. 终裁剪：禁用（可能误伤）
+        
+        out[k] = {"text": t, "start": s, "end": e}
+
+    lg.info(f"[infer] fields={len(out)}")
+    return out
+
+
+def predict_one(
+    cfg: PredictConfig,
+    model: EBQAModel,
+    collate: QACollator,
+    report_title: str,
+    report_text: str,
+) -> Dict[str, Dict[str, Any]]:
+    """预测函数入口，使用关键词边界截断"""
+    return predict_one_base(cfg, model, collate, report_title, report_text)
+
+
+# =========================
+# 便捷接口 / Demo
+# =========================
+def predict_for(
+    report_title: str, report_text: str, cfg: Optional[PredictConfig] = None
+):
+    """使用缓存模型进行预测，避免重复加载（已优化）"""
+    if cfg is None:
+        cfg = PredictConfig()
+    # ✅ 使用缓存模型，而不是每次重新加载
+    model, collate, _ = _get_smart_cached_model(cfg)
+    return predict_one(cfg, model, collate, report_title, report_text)
+
+
+if __name__ == "__main__":
+    import argparse
+
+    # parser = argparse.ArgumentParser(description="EBQA predict demo (strict config)")
+    # parser.add_argument(
+    #     "--config",
+    #     type=str,
+    #     default=".ebqa_config.json",
+    #     help="Path to .ebqa_config.json",
+    # )
+    # args = parser.parse_args()
+
+    # 严格从共享配置读取（函数内部会抛异常）
+    cfg_path = os.environ.get(
+        "EBQA_CONFIG_PATH",
+        ".ebqa_config.json",
+    )
+    cfgd = load_ebqa_cfg(cfg_path)
+
+    lens = lengths_from(cfgd)
+    pred_blk = predict_block(cfgd)
+
+    cfg = PredictConfig(
+        model_dir=resolve_model_dir(cfgd),
+        tokenizer_name=resolve_tokenizer_name(cfgd),
+        report_struct_path=resolve_report_struct_path(cfgd),
+    )
+    cfg.max_seq_len = lens["max_seq_len"]
+    cfg.max_tokens_ctx = lens["max_tokens_ctx"]
+    cfg.max_answer_len = lens["max_answer_len"]
+    cfg.chunk_mode = chunk_mode_from(cfgd)
+    cfg.batch_size = int(pred_blk["batch_size"])  # 必须由配置提供
+    cfg.enable_no_answer = bool(pred_blk["enable_no_answer"])  # 必须由配置提供
+    cfg.null_threshold = float(
+        pred_blk["null_threshold"]
+    )  # 可被 CLI 覆盖（见 evaluate.py）
+    cfg.null_agg = str(pred_blk["null_agg"])  # 必须由配置提供
+
+    demo_title = "出院记录"
+    demo_text = """第2页 上海市第一妇婴保健院 24小时内入出院记录 0 姓名：徐松蕾 科别：乳腺科 病区：1A病区 床位：1A12 住院号：D00263180 第1页 信扫一扫 A病区 上海市第一妇婴保健院 门诊号：0P31186444 1A病 肿瘤 24小时内入出院记录 住院号：D00263180 肿 科别：乳腺科 病室：1A病区床位：1A12 姓名：徐松蕾性别：女年龄：36岁职业：其他 入院时间： 2025.09.2308 出院时间： 2025.09.2315 Y 科 主诉：右乳癌新辅助化疗 入院情况：手术时间：2025.08.18 手术方式：右侧乳房穿刺活检 术后病理结果： 1、(右乳外侧肿块穿刺标本)少量浸润性癌组织。 2、(右乳内上肿块穿刺标本)乳腺浸润性癌Ⅲ级，非特殊型。 3、(右腋下淋巴结穿刺标本)见癌累及。 免疫组化IHC:2#(右乳内上肿块穿刺标本)：ER(-),PR(-),CerbB-2(1+),Ki-67(70%+) 化疗方案：wPCb*18 化疗适应症：浸润性癌，三阴性，腋窝淋巴结多发转移。 化疗禁忌症：暂无。 入院诊断：术前新辅助化疗(C1D15);右乳癌（浸润性癌II级，pT4N3Mx,IIIC期） 入院时主要症状和体征：血常规、肝肾功能无殊 EBRA 诊疗经过：化疗前评估：无明显化疗禁忌 化疗方案：白蛋白紫杉醇 200mg,d1;卡铂（波贝） 200mg,d1。 此次化疗不良反应：无 出院情况：暂无明显不适\n\n出院诊断：术前新辅助化疗(C2D1);右乳癌（浸润性癌II级，pT4N3Mx,IIIC期） 出院医嘱：1.下次化疗时间距本次化疗1周。 2.出院后每周门诊随访血常规至化疗后3~4周，若白细胞低于3.5×10^9/L,注射升白细胞药"""
+
+    model, collate, _ = _get_smart_cached_model(cfg)
+    preds = predict_one(cfg, model, collate, demo_title, demo_text)
+    print(json.dumps(preds, ensure_ascii=False, indent=2))

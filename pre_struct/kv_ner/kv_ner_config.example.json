@@ -1,0 +1,63 @@
+{
+  "_comment_1": "=== 模型配置 ===",
+  "model_name_or_path": "/mnt/windows/Users/Admin/LLM/models/bert_multi_language/",
+  "tokenizer_name_or_path": "/mnt/windows/Users/Admin/LLM/models/bert_multi_language/",
+  "model_dir": "runs/kv_ner_ruyuan/best",
+  
+  "_comment_2": "=== 标签映射（Label Studio 标签名 -> 统一标签）===",
+  "label_map": {
+    "键名": "KEY",
+    "值": "VALUE",
+    "医院名称": "HOSPITAL"
+  },
+  
+  "_comment_3": "=== 序列长度配置 ===",
+  "max_seq_length": 512,
+  "label_all_tokens": true,
+  
+  "_comment_4": "=== 数据准备配置（prepare_data.py 使用）===",
+  "data": {
+    "_comment": "可以配置多个 Label Studio 导出文件，会自动合并。只划分训练集和验证集，测试集在训练时动态划分",
+    "input_files": [
+      "data/ruyuanjilu/ruyuan-2025-10-16.json",
+      "data/ruyuanjilu/other-data-1.json",
+      "data/ruyuanjilu/other-data-2.json"
+    ],
+    "output_dir": "data/kv_ner_prepared",
+    "train_ratio": 0.8,
+    "seed": 42
+  },
+  
+  "_comment_5": "=== 训练配置 ===",
+  "train": {
+    "_comment": "使用 prepare_data.py 生成的数据。test_split_ratio 控制从验证集中划分多少作为测试集",
+    "data_path": "data/kv_ner_prepared/train.json",
+    "val_data_path": "data/kv_ner_prepared/val.json",
+    "test_split_ratio": 0.5,
+    "output_dir": "runs/kv_ner_ruyuan",
+    "train_batch_size": 16,
+    "eval_batch_size": 16,
+    "num_workers": 0,
+    "pin_memory": false,
+    "learning_rate": 3e-5,
+    "weight_decay": 0.01,
+    "num_train_epochs": 3,
+    "gradient_accumulation_steps": 1,
+    "warmup_ratio": 0.1,
+    "max_grad_norm": 1.0,
+    "dropout": 0.1,
+    "freeze_encoder": false,
+    "unfreeze_last_n_layers": null
+  },
+  
+  "_comment_6": "=== 推理配置 ===",
+  "predict": {
+    "input_path": "data/ruyuanjilu/ruyuan-2025-10-16.json",
+    "output_path": "runs/kv_ner_ruyuan/predictions.json",
+    "model_dir": "runs/kv_ner_ruyuan/best",
+    "batch_size": 16,
+    "num_workers": 0,
+    "pin_memory": false
+  }
+}
+
