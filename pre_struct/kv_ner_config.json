@@ -1,16 +1,37 @@
 {
-  "train_path": "/data/ocean/FT_workspace/ner-finetune/data/huizhenbingli1119.json",
-  "dev_path":   "/data/ocean/FT_workspace/ner-finetune/data/menzhenbingli1119.json",
-  "test_path":  null,
-  "pretrained_model_path": "/data/ocean/bpe_workspace/output_medical_bert_v2_8gpu/final_model",
-  "tokenizer_path":        "/data/ocean/bpe_workspace/output_medical_bert_v2_8gpu/final_model",
+  "model_name_or_path": "/data/ocean/bpe_workspace/output_medical_bert_v2_8gpu/final_model",
+  "tokenizer_name_or_path": "/data/ocean/bpe_workspace/output_medical_bert_v2_8gpu/final_model",
+  "model_dir": "runs/kv_ner/best",
+
+  "label_map": {
+    "键名": "KEY",
+    "值": "VALUE",
+    "医院名称": "HOSPITAL"
+  },
+
   "max_seq_length": 512,
-  "per_device_train_batch_size": 16,
-  "per_device_eval_batch_size": 16,
-  "gradient_accumulation_steps": 1,
-  "num_train_epochs": 5,
-  "learning_rate": 3e-5,
-  "warmup_ratio": 0.1,
-  "output_dir": "/data/ocean/FT_workspace/ner-finetune/kv_ner_output",
-  "fp16": true
+  "label_all_tokens": true,
+
+  "train": {
+    "data_path": "/data/ocean/FT_workspace/ner-finetune/data/huizhenbingli1119.json",
+    "val_data_path": "/data/ocean/FT_workspace/ner-finetune/data/menzhenbingli1119.json",
+    "test_split_ratio": 0.5,
+    "output_dir": "/data/ocean/FT_workspace/ner-finetune/kv_ner_output",
+    "train_batch_size": 16,
+    "eval_batch_size": 16,
+    "num_workers": 0,
+    "pin_memory": false,
+    "learning_rate": 3e-5,
+    "weight_decay": 0.01,
+    "num_train_epochs": 5,
+    "gradient_accumulation_steps": 1,
+    "warmup_ratio": 0.1,
+    "max_grad_norm": 1.0,
+    "dropout": 0.1,
+    "freeze_encoder": false,
+    "unfreeze_last_n_layers": null,
+    "use_amp": true,
+    "amp_dtype": "bf16",
+    "log_per_token_loss": true
+  }
 }
