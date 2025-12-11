@@ -1,0 +1,79 @@
+{
+  "empty_data": [
+    {
+      "entities": []
+    }
+  ],
+  "conflict_data": {
+    "y_true": [
+      {
+        "entities": [
+          {"start": 5, "end": 9, "type": "患者姓名", "text": "李女士"},
+          {"start": 10, "end": 13, "type": "年龄", "text": "52岁"}
+        ]
+      }
+    ],
+    "y_pred": [
+      {
+        "entities": [
+          {"start": 6, "end": 9, "type": "患者姓名", "text": "李女士"},
+          {"start": 10, "end": 13, "type": "年龄", "text": "52岁"}
+        ]
+      }
+    ]
+  },
+  "perfect_match": [
+    {
+      "entities": [
+        {"start": 5, "end": 9, "type": "患者姓名", "text": "李女士"},
+        {"start": 15, "end": 18, "type": "年龄", "text": "52岁"},
+        {"start": 25, "end": 27, "type": "性别", "text": "女"}
+      ]
+    }
+  ],
+  "semi_structured_conflict_data": {
+    "y_true": [
+      {
+        "entities": [
+          {"start": 10, "end": 13, "text": "李女士"},
+          {"start": 19, "end": 22, "text": "52岁"}
+        ]
+      }
+    ],
+    "y_pred": [
+      {
+        "entities": [
+          {"start": 11, "end": 13, "text": "李女士"},
+          {"start": 19, "end": 22, "text": "52岁"}
+        ]
+      }
+    ]
+  },
+  "semi_structured_perfect_match": [
+    {
+      "entities": [
+        {"start": 10, "end": 13, "text": "李女士"},
+        {"start": 19, "end": 22, "text": "52岁"},
+        {"start": 28, "end": 29, "text": "女"}
+      ]
+    }
+  ],
+  "long_text_data": {
+    "y_true": [
+      {
+        "entities": [
+          {"start": 400, "end": 450, "text": "患者因右侧乳房肿块入院，一般情况良好，神志清楚，精神可，饮食睡眠正常，大小便正常，体重无明显变化"},
+          {"start": 460, "end": 520, "text": "住院期间完善相关检查，行右侧乳腺癌改良根治术，手术顺利，术后恢复良好，伤口愈合良好，无并发症发生"}
+        ]
+      }
+    ],
+    "y_pred": [
+      {
+        "entities": [
+          {"start": 401, "end": 451, "text": "患者因右侧乳房肿块入院，一般情况良好，神志清楚，精神可，饮食睡眠正常，大小便正常，体重无明显变化"},
+          {"start": 461, "end": 521, "text": "住院期间完善相关检查，行右侧乳腺癌改良根治术，手术顺利，术后恢复良好，伤口愈合良好，无并发症发生"}
+        ]
+      }
+    ]
+  }
+} 
