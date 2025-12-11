@@ -16,12 +16,11 @@
   "value_same_line_only": true,
   "data": {
     "input_files": [
-      "data/ruyuanjilu/ruyuanjilu-2025-10-30-09-32.json",
-      "data/menzhenbingli/menzhen-2025-10-30.json",
-      "data/shuhoubingli/shuhoubingli-2025-10-30-09-28.json",
-      "data/huojianbingli/huojianbingli-2025-11-05.json",
-      "data/huizhenbingli/huizhenbingli-2025-11-11.json",
-      "data/DA/clean_ocr_ppt_da_v4_7_report_key_alias.json"
+      "data/ruyuanjilu1119.json",
+      "data/menzhenbingli1119.json",
+      "data/shuhoubingli1119.json",
+      "data/huojianbingli1119.json",
+      "data/huizhenbingli1119.json"
     ],
     "output_dir": "data/kv_ner_prepared",
     "train_ratio": 0.9,
