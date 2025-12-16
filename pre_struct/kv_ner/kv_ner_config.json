@@ -1,6 +1,6 @@
 {
-  "model_name_or_path": "/mnt/windows/Users/Admin/LLM/models/bert_multi_language/",
-  "tokenizer_name_or_path": "/mnt/windows/Users/Admin/LLM/models/bert_multi_language/",
+  "model_name_or_path": "/data/ocean/bpe_workspace/output_medical_bert_v2_8gpu/final_model",
+  "tokenizer_name_or_path": "/data/ocean/bpe_workspace/my-medical-tokenizer",
   "model_dir": "runs/kv_ner4_bioe/best",
   "label_map": {
     "键名": "KEY",
