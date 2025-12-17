@@ -1,6 +1,6 @@
 {
   "model_name_or_path": "/data/ocean/cache/huggingface/hub/models--hfl--chinese-roberta-wwm-ext",
-  "tokenizer_name_or_path": "/data/ocean/cache/huggingface/hub/models--hfl--chinese-roberta-wwm-ext",
+  "tokenizer_name_or_path": "hfl/chinese-roberta-wwm-ext",
   "model_dir": "runs/kv_ner4_bioe_roberta_base/best",
   "label_map": {
     "键名": "KEY",
