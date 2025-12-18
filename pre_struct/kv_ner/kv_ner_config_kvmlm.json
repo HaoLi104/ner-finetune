@@ -1,6 +1,6 @@
 {
-  "model_name_or_path": "/data/ocean/bpe_workspace/output_medical_bert_v2_8gpu/final_model",
-  "tokenizer_name_or_path": "/data/ocean/bpe_workspace/my-medical-tokenizer",
+  "model_name_or_path": "/data/ocean/bpe_workspace/output_medical_bert_kvmlm/final_model",
+  "tokenizer_name_or_path": "hfl/chinese-roberta-wwm-ext",
   "model_dir": "runs/kv_ner4_bioe_kvmlm/best",
   "label_map": {
     "键名": "KEY",
