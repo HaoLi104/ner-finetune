@@ -1,0 +1,70 @@
+{
+  "model_name_or_path": "/data/ocean/bpe_workspace/output_medical_bert_v2_8gpu/final_model",
+  "tokenizer_name_or_path": "/data/ocean/bpe_workspace/my-medical-tokenizer",
+  "model_dir": "runs/kv_ner4_bioe_kvmlm/best",
+  "label_map": {
+    "键名": "KEY",
+    "值": "VALUE",
+    "医院名称": "HOSPITAL"
+  },
+  "max_seq_length": 512,
+  "label_all_tokens": true,
+  "chunk_size": 500,
+  "chunk_overlap": 50,
+  "merge_adjacent_gap": 5,
+  "value_attach_window": 60,
+  "value_same_line_only": true,
+  "data": {
+    "input_files": [
+      "data/ruyuanjilu1119.json",
+      "data/menzhenbingli1119.json",
+      "data/shuhoubingli1119.json",
+      "data/huojianbingli1119.json",
+      "data/huizhenbingli1119.json"
+    ],
+    "output_dir": "data/kv_ner_prepared",
+    "train_ratio": 0.9,
+    "seed": 42,
+    "exclude_titles_from_da": ["入院记录", "术后病理", "门诊病历", "活检病理","会诊病理"]
+  },
+  "train": {
+    "data_path": "data/kv_ner_prepared/train.json",
+    "val_data_path": "data/kv_ner_prepared/val.json",
+    "test_split_ratio": 0.5,
+    "output_dir": "runs/kv_ner4_bioe_kvmlm",
+    "train_batch_size": 8,
+    "eval_batch_size": 8,
+    "num_workers": 0,
+    "pin_memory": false,
+    "learning_rate": 2e-5,
+    "weight_decay": 0.03,
+    "num_train_epochs": 6,
+    "gradient_accumulation_steps": 1,
+    "warmup_ratio": 0.05,
+    "max_grad_norm": 1.0,
+    "dropout": 0.2,
+    "freeze_encoder": false,
+    "unfreeze_last_n_layers": null,
+    "use_bilstm": true,
+    "lstm_hidden_size": 384,
+    "lstm_num_layers": 3,
+    "lstm_dropout": 0.2,
+    "log_per_token_loss": true
+  },
+  "predict": {
+    "input_path": "data/kv_ner_prepared/val_eval.jsonl",
+    "output_path": "runs/kv_ner4_bioe_kvmlm/predictions.json",
+    "model_dir": "runs/kv_ner4_bioe_kvmlm/best",
+    "batch_size": 16,
+    "num_workers": 0,
+    "pin_memory": false
+  },
+  "evaluate": {
+    "model_dir": "runs/kv_ner4_bioe_kvmlm/best",
+    "eval_data_path": "data/kv_ner_prepared/val_eval.jsonl",
+    "output_dir": "data/kv_ner_eval_bioe_kvmlm",
+    "batch_size": 16,
+    "num_workers": 0,
+    "pin_memory": false
+  }
+}
